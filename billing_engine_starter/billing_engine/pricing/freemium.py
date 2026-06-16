@@ -21,3 +21,28 @@ class Freemium(PricingStrategy):
     def calculate(self, quantity: int) -> Money:
         # TODO Day 1
         raise NotImplementedError("Day 1: implement Freemium.calculate")
+
+
+from billing_engine.money import Money
+from billing_engine.pricing.base import PricingStrategy
+
+class Freemium(PricingStrategy):
+    def __init__(self, free_quota: int, overage_strategy: PricingStrategy):
+        if free_quota < 0:
+            raise ValueError("Free quota cannot be negative")
+        if not isinstance(overage_strategy, PricingStrategy):
+            raise TypeError("Overage strategy must implement PricingStrategy")
+            
+        self.free_quota = free_quota
+        self.overage_strategy = overage_strategy
+
+    def calculate(self, quantity: int) -> Money:
+        if quantity < 0:
+            raise ValueError("Quantity cannot be negative")
+            
+        inner_currency = self.overage_strategy.calculate(0).currency
+        
+        if quantity <= self.free_quota:
+            return Money.zero(inner_currency)
+            
+        return self.overage_strategy.calculate(quantity - self.free_quota)
