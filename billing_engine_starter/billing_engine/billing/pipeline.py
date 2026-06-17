@@ -38,5 +38,80 @@ def build_invoice(
     invoice_count_so_far: int,
 ) -> Invoice:
     """Pure function. Returns an Invoice (id=None, status=DRAFT) ready to be persisted."""
-    # TODO Day 2
-    raise NotImplementedError("Day 2: implement build_invoice")
+    
+    currency = plan.currency
+    line_items: list[InvoiceLineItem] = []
+
+    # 1. Base Charge Calculation
+    base_charge = strategy.calculate(usage_quantity)
+    line_items.append(
+        InvoiceLineItem(
+            id=None,
+            invoice_id=None,
+            description=f"Base subscription charge for {plan.name} ({usage_quantity} units used)",
+            amount=base_charge,
+            kind=LineItemKind.BASE_CHARGE
+        )
+    )
+
+    # 2. Discount Evaluation & Application
+    discount_amount = Money.zero(currency)
+    if discount:
+        context = DiscountContext(
+            invoice_count_so_far=invoice_count_so_far,
+            period_start=period_start
+        )
+        discount_amount = discount.apply(base_charge, context)
+        
+        if discount_amount.amount > 0:
+            line_items.append(
+                InvoiceLineItem(
+                    id=None,
+                    invoice_id=None,
+                    description=f"Discount applied: {discount.code}",
+                    amount=discount_amount,
+                    kind=LineItemKind.DISCOUNT
+                )
+            )
+
+    # 3. Compute Taxable Amount
+    taxable_amount = base_charge - discount_amount
+
+    # 4. Compute Tax
+    tax_result = tax_calc.apply(taxable_amount, tax_context)
+    for tax_line in tax_result.lines:
+        line_items.append(
+            InvoiceLineItem(
+                id=None,
+                invoice_id=None,
+                description=tax_line.description,
+                amount=tax_line.amount,
+                kind=LineItemKind.TAX
+            )
+        )
+
+    # 5. Compute Final Total
+    total_amount = taxable_amount + tax_result.total
+
+    # 6. Build and Assemble the Draft Invoice Model
+    invoice = Invoice(
+        id=None,
+        subscription_id=subscription.id,
+        period_start=period_start,
+        period_end=period_end,
+        status=InvoiceStatus.DRAFT,
+        currency=currency,
+        total_amount=total_amount,
+        tax_amount=tax_result.total,
+        pdf_path=None
+    )
+    
+    # Securely wire the built line items to the object if your model tracks them
+    if hasattr(invoice, "line_items"):
+        invoice.line_items = line_items
+    else:
+        # If your local test framework expects it returned as an explicit tuple 
+        # or attached via a custom attribute, it's safer to provide both or keep it decoupled.
+        invoice._line_items = line_items
+
+    return invoice
