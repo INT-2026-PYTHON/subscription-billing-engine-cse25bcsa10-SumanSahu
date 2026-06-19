@@ -132,6 +132,72 @@ class BillingCycle:
 
     # --------------------------------------------------------
     def upgrade_subscription(self, subscription_id: int, new_plan_id: int, switch_date: date) -> None:
-        """Mid-cycle upgrade — Day 4 stretch."""
-        # TODO Day 4
-        raise NotImplementedError("Day 4: implement BillingCycle.upgrade_subscription")
+        """Mid-cycle upgrade — applies proration credits/charges and changes plans atomically."""
+        with self.db.transaction():
+            sub = self.subscription_repo.get(subscription_id)
+            if not sub:
+                raise ValueError(f"Subscription {subscription_id} not found")
+            
+            customer = self.customer_repo.get(sub.customer_id)
+            old_plan = self.plan_repo.get(sub.plan_id)
+            new_plan = self.plan_repo.get(new_plan_id)
+            
+            # Resolve prices (assuming standard base tier or simple base pricing strategy lookup)
+            old_strategy = self.strategy_factory(old_plan)
+            new_strategy = self.strategy_factory(new_plan)
+            
+            # Base price before volume/usage additions
+            old_base_price = old_strategy.calculate_base_price() 
+            new_base_price = new_strategy.calculate_base_price()
+            
+            tax_calculator, tax_context = self.tax_factory(customer)
+            
+            # Compute proration split
+            from billing_engine.billing.proration import compute_proration
+            proration = compute_proration(
+                old_base_price, new_base_price,
+                sub.current_period_start, sub.current_period_end,
+                switch_date, tax_calculator, tax_context
+            )
+            
+            # Construct line items for the proration invoice
+            from billing_engine.models import Invoice, InvoiceStatus, InvoiceLineItem, LineItemKind
+            
+            currency = old_plan.currency
+            net_charge = proration.charge_amount - proration.credit_amount
+            net_tax = proration.charge_tax - proration.credit_tax
+            total_amount = net_charge + net_tax
+            
+            proration_invoice = Invoice(
+                id=None,
+                subscription_id=sub.id,
+                period_start=switch_date,
+                period_end=sub.current_period_end,
+                status=InvoiceStatus.UNPAID,
+                currency=currency,
+                total_amount=total_amount,
+                tax_amount=net_tax,
+                pdf_path=None
+            )
+            
+            invoice_id = self.invoice_repo.add(proration_invoice)
+            
+            # Save Credit & Charge Line items
+            self.line_item_repo.add(InvoiceLineItem(
+                id=None, invoice_id=invoice_id, kind=LineItemKind.CREDIT,
+                description=f"Prorated unused time on {old_plan.name}", amount=-proration.credit_amount
+            ))
+            self.line_item_repo.add(InvoiceLineItem(
+                id=None, invoice_id=invoice_id, kind=LineItemKind.BASE,
+                description=f"Prorated remaining time on {new_plan.name}", amount=proration.charge_amount
+            ))
+            
+            # Post matching Ledger DEBIT
+            self.ledger_repo.post_debit(
+                customer_id=sub.customer_id,
+                amount=total_amount,
+                reference_id=invoice_id
+            )
+            
+            # Mutate state safely within the transaction block boundary
+            self.subscription_repo.update_plan(sub.id, new_plan_id)
