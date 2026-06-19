@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import sqlite3
 from typing import Callable, Optional
 
 from billing_engine.db import (
@@ -15,7 +16,9 @@ from billing_engine.db import (
     UsageRecordRepository, InvoiceRepository, InvoiceLineItemRepository,
     LedgerRepository,
 )
-from billing_engine.models import Subscription
+from billing_engine.models import Subscription, SubscriptionStatus
+# Note: Ensure build_invoice is imported from your pure pipeline module
+from billing_engine.billing.pipeline import build_invoice
 
 
 @dataclass
@@ -57,8 +60,75 @@ class BillingCycle:
     # --------------------------------------------------------
     def run(self, as_of: date) -> BillingResult:
         """Bill all subscriptions whose current period ends on or before `as_of`."""
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement BillingCycle.run")
+        invoices_created = 0
+        invoices_skipped_duplicate = 0
+        trials_activated = 0
+
+        # 1. Trial Activation Loop
+        # Check all subscriptions to see if their trial has expired as of today
+        for sub in self.subscription_repo.list_all():
+            if sub.status == SubscriptionStatus.TRIAL and sub.trial_end and sub.trial_end <= as_of:
+                self.subscription_repo.update_status(sub.id, SubscriptionStatus.ACTIVE)
+                trials_activated += 1
+
+        # 2. Due-Subscription Discovery
+        due_subscriptions = self.subscription_repo.get_due_for_billing(as_of)
+
+        # 3. Process each due subscription inside its own atomic transaction boundary
+        for sub in due_subscriptions:
+            try:
+                # Wrap all writes inside a single database transaction context
+                with self.db.transaction():
+                    # Look up dependency records
+                    customer = self.customer_repo.get_by_id(sub.customer_id)
+                    plan = self.plan_repo.get_by_id(sub.plan_id)
+                    usage = self.usage_repo.get_for_period(sub.id, sub.current_period_start, sub.current_period_end)
+
+                    # Initialize factories for pure pipeline domain logic
+                    strategy = self.strategy_factory(plan)
+                    discount = self.discount_factory(sub.discount_id) if sub.discount_id else None
+                    tax_calculator, tax_context = self.tax_factory(customer)
+
+                    # Generate pure domain entity representation of the Invoice
+                    invoice = build_invoice(
+                        subscription=sub,
+                        plan=plan,
+                        customer=customer,
+                        usage_records=usage,
+                        pricing_strategy=strategy,
+                        discount=discount,
+                        tax_calculator=tax_calculator,
+                        tax_context=tax_context,
+                        as_of=as_of
+                    )
+
+                    # Persist Invoice and its associated Line Items
+                    invoice_id = self.invoice_repo.add(invoice)
+                    for line in invoice.line_items:
+                        self.line_item_repo.add(invoice_id, line)
+
+                    # Post Ledger DEBIT transaction
+                    self.ledger_repo.post_debit(
+                        customer_id=sub.customer_id,
+                        amount=invoice.total_amount,
+                        reference_id=invoice_id
+                    )
+
+                    # Advance subscription tracking window forward
+                    self.subscription_repo.advance_period(sub.id)
+                    
+                    invoices_created += 1
+
+            except sqlite3.IntegrityError:
+                # Triggers on schema constraint UNIQUE(subscription_id, period_start)
+                # Safely catches double runs on the same date block, providing idempotency
+                invoices_skipped_duplicate += 1
+
+        return BillingResult(
+            invoices_created=invoices_created,
+            invoices_skipped_duplicate=invoices_skipped_duplicate,
+            trials_activated=trials_activated
+        )
 
     # --------------------------------------------------------
     def upgrade_subscription(self, subscription_id: int, new_plan_id: int, switch_date: date) -> None:
