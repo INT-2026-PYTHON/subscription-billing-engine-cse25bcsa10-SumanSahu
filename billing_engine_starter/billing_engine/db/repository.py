@@ -548,4 +548,3 @@ class PaymentAttemptRepository:
         with self.db.connect() as conn:
             row = conn.execute(query, (invoice_id,)).fetchone()
         return row[0]
-        raise NotImplementedError("Day 3: implement PaymentAttemptRepository.count_for_invoice")
