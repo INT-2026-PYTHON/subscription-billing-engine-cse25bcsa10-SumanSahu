@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import random
 from typing import Optional
 
 from billing_engine.models import Invoice
@@ -41,12 +42,13 @@ class ScriptedGateway(PaymentGateway):
     """
 
     def __init__(self, results: list[PaymentResult]) -> None:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.__init__")
+        # Convert to a list so we can modify it or pop items sequentially
+        self._queue = list(results)
 
     def charge(self, invoice: Invoice) -> PaymentResult:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.charge")
+        if not self._queue:
+            raise ValueError("ScriptedGateway queue is exhausted; no more pre-set results available.")
+        return self._queue.pop(0)
 
 
 # ----------------------------------------------------------------
@@ -56,9 +58,13 @@ class FakeRandomGateway(PaymentGateway):
     """Succeeds at a configurable rate; seeded for reproducibility."""
 
     def __init__(self, success_rate: float = 0.7, seed: Optional[int] = None) -> None:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.__init__")
+        self.success_rate = success_rate
+        # Create an isolated instance of Random to ensure reproducibility without affecting global state
+        self._rng = random.Random(seed)
 
     def charge(self, invoice: Invoice) -> PaymentResult:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.charge")
+        # Generate a uniform float from 0.0 to 1.0. If it falls below success_rate, charge succeeds.
+        if self._rng.random() < self.success_rate:
+            return PaymentResult(success=True)
+        
+        return PaymentResult(success=False, failure_reason="CARD_DECLINED")
