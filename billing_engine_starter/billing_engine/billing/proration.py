@@ -48,5 +48,31 @@ def compute_proration(
     tax_context: TaxContext,
 ) -> ProrationResult:
     """Pure function. STRETCH — implement only after Days 1+2 are green."""
-    # TODO Day 4
-    raise NotImplementedError("Day 4: implement compute_proration")
+    # 1. Validation Guards
+    if not (period_start <= switch_date <= period_end):
+        raise ValueError(f"switch_date {switch_date} outside period [{period_start}, {period_end}]")
+    if old_plan_price.currency != new_plan_price.currency:
+        raise ValueError("Cannot prorate across currencies")
+
+    total_days = (period_end - period_start).days
+    if total_days <= 0:
+        raise ValueError("Period must be positive")
+
+    # 2. Ratio Calculation
+    remaining_days = (period_end - switch_date).days
+    ratio = Decimal(remaining_days) / Decimal(total_days)
+
+    # 3. Fractional Un-taxed Calculations
+    credit_amount = old_plan_price * ratio
+    charge_amount = new_plan_price * ratio
+
+    # 4. Independent Tax Legs Check (Applied directly to fractional chunks)
+    credit_tax_result = tax_calc.apply(credit_amount, tax_context)
+    charge_tax_result = tax_calc.apply(charge_amount, tax_context)
+
+    return ProrationResult(
+        credit_amount=credit_amount,
+        charge_amount=charge_amount,
+        credit_tax=credit_tax_result.total,
+        charge_tax=charge_tax_result.total
+    )
